@@ -20,19 +20,20 @@ package subscribe
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
 	log "github.com/golang/glog"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/peer"
-	"google.golang.org/grpc/status"
 	"github.com/golang/protobuf/proto"
 	"github.com/openconfig/gnmi/cache"
 	"github.com/openconfig/gnmi/coalesce"
 	"github.com/openconfig/gnmi/ctree"
 	"github.com/openconfig/gnmi/match"
 	"github.com/openconfig/gnmi/path"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/openconfig/gnmi/proto/gnmi"
 )
@@ -225,6 +226,94 @@ func (s *Server) Subscribe(stream pb.GNMI_SubscribeServer) error {
 	go s.sendStreamingResults(&c)
 
 	return <-errC
+}
+
+// SubscribeLocal registers a set of paths to listen to. It returns a queue
+// object into which the updates will be sent, and a remove function that stops
+// the queue from being updated.
+func (s *Server) SubscribeLocal(target string, paths []*pb.Path, prefix *pb.Path) (*coalesce.Queue, func(), error) {
+	if !s.c.HasTarget(target) {
+		return nil, nil, status.Errorf(codes.NotFound, "no such target: %q", target)
+	}
+
+	log.Infof("target: %q SubscribeLocal start: %s", target, paths)
+	defer log.Infof("target %q SubscribeLocal start: end: %q", target, paths)
+
+	queue := coalesce.NewQueue()
+
+	remove := addLocalSubscription(s.m, paths, prefix, &matchClient{q: queue})
+
+	c := &localSubscription{
+		target: target,
+		paths:  paths,
+		prefix: prefix,
+		queue:  queue,
+	}
+	if err := s.processLocalSubscription(c); err != nil {
+		return nil, nil, err
+	}
+	return queue, remove, nil
+}
+
+// addLocalSubscription registers all subscriptions for this local task for update matching.
+func addLocalSubscription(m *match.Match, paths []*pb.Path, prefix *pb.Path, c *matchClient) (remove func()) {
+	var removes []func()
+	pfx := path.ToStrings(prefix, true)
+	for _, p := range paths {
+		query := pfx
+		if origin := p.GetOrigin(); prefix.GetOrigin() == "" && origin != "" {
+			query = append(pfx, origin)
+		}
+		query = append(query, path.ToStrings(p, false)...)
+		removes = append(removes, m.AddQuery(query, c))
+	}
+	return func() {
+		for _, remove := range removes {
+			remove()
+		}
+	}
+}
+
+type localSubscription struct {
+	target string
+	paths  []*pb.Path
+	prefix *pb.Path
+	queue  *coalesce.Queue
+}
+
+// processLocalSubscription walks the cache tree and inserts all of the matching
+// nodes into the coalesce queue.
+func (s *Server) processLocalSubscription(c *localSubscription) (err error) {
+	log.V(2).Infof("start processLocalSubscription for %p", c)
+	// Close the cache client queue on error.
+	defer func() {
+		defer log.V(2).Infof("end processLocalSubscription for %p", c)
+		if err != nil {
+			log.Error(err)
+			c.queue.Close()
+			err = fmt.Errorf("processLocalSubscription: %v", err)
+		}
+	}()
+	for _, p := range c.paths {
+		var fullPath []string
+		fullPath, err = path.CompletePath(c.prefix, p)
+		if err != nil {
+			return
+		}
+		// Note that fullPath doesn't contain target name as the first element.
+		s.c.Query(c.target, fullPath, func(_ []string, l *ctree.Leaf, _ interface{}) error {
+			// Stop processing query results on error.
+			if err != nil {
+				return err
+			}
+			_, err = c.queue.Insert(l)
+			return nil
+		})
+		if err != nil {
+			return
+		}
+	}
+	return
 }
 
 type resp struct {
