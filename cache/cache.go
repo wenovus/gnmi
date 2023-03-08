@@ -27,14 +27,14 @@ import (
 	"time"
 
 	log "github.com/golang/glog"
-	"google.golang.org/protobuf/encoding/prototext"
-	"google.golang.org/protobuf/proto"
 	"github.com/openconfig/gnmi/ctree"
 	"github.com/openconfig/gnmi/errlist"
 	"github.com/openconfig/gnmi/latency"
 	"github.com/openconfig/gnmi/metadata"
 	"github.com/openconfig/gnmi/path"
 	"github.com/openconfig/gnmi/value"
+	"google.golang.org/protobuf/encoding/prototext"
+	"google.golang.org/protobuf/proto"
 
 	pb "github.com/openconfig/gnmi/proto/gnmi"
 )
@@ -481,6 +481,7 @@ func (t *Target) gnmiUpdate(n *pb.Notification) (*ctree.Leaf, error) {
 		case n.GetTimestamp() < old.GetTimestamp():
 			// Update rejected. Timestamp < previous recorded timestamp.
 			t.meta.AddInt(metadata.StaleCount, 1)
+			fmt.Printf("HAHAHA %v, old: %v, new: %v\n", path, old.GetTimestamp(), n.GetTimestamp())
 			return nil, ErrStale
 		case n.GetTimestamp() == old.GetTimestamp():
 			if !proto.Equal(old, n) {
@@ -490,6 +491,7 @@ func (t *Target) gnmiUpdate(n *pb.Notification) (*ctree.Leaf, error) {
 				// Allow to continue to update the cache taking the last supplied value for this timestamp.
 			} else {
 				t.meta.AddInt(metadata.StaleCount, 1)
+				fmt.Printf("HAHAHA same timestamp: %v\n", path)
 				return nil, ErrStale
 			}
 		}
